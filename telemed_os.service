@@ -1,0 +1,26 @@
+[Unit]
+Description=RemindCare Service
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/telemed_os
+
+# 🔒 Credenciais ficam ocultas em um arquivo seguro (Permissão 600) na placa
+EnvironmentFile=/home/pi/telemed_os/.env.production
+
+ExecStart=/home/pi/telemed_os/telemed_os
+
+# Políticas de Restart para maior resiliência
+Restart=always
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
