@@ -9,7 +9,7 @@ echo "⚙️ Compilando para AArch64 (Raspberry Pi OS Lite 64-bit)..."
 cargo build --release --target aarch64-unknown-linux-gnu
 
 echo "🛑 Parando o serviço remoto (se estiver rodando)..."
-ssh $PI_USER@$PI_HOST "sudo systemctl stop telemed_os || true"
+ssh -t $PI_USER@$PI_HOST "sudo systemctl stop telemed_os || true"
 
 echo "📦 Transferindo arquivos de produção..."
 # Se houver um arquivo binário antigo com o mesmo nome da pasta, remove ele primeiro
@@ -23,7 +23,7 @@ echo "🔒 Configurando permissões de segurança remotamente..."
 ssh $PI_USER@$PI_HOST "chmod 600 $PI_DIR/.env.production && chmod +x $PI_DIR/telemed_os"
 
 echo "🚀 Registrando e reiniciando o serviço no Systemd..."
-ssh $PI_USER@$PI_HOST "
+ssh -t $PI_USER@$PI_HOST "
   sudo cp $PI_DIR/telemed_os.service /etc/systemd/system/
   sudo systemctl daemon-reload
   sudo systemctl enable telemed_os

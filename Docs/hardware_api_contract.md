@@ -1,10 +1,10 @@
-# Contrato de Integração de Firmware (Hardware ↔ Servidor) 
+# Contrato de Integração de Firmware (Hardware ↔ Servidor) 📡
 
 Este documento serve como contrato de comunicação para o **Engenheiro de Firmware/Embarcados** responsável pelo código da Raspberry Pi (ou microcontrolador similar). Ele define como o hardware deve interagir com a API em nuvem (VPS).
 
 ---
 
-## 1. Princípios Arquiteturais
+## ⚙️ 1. Princípios Arquiteturais
 
 *   **Padrão de Comunicação:** A caixa IoT atua **exclusivamente como Cliente HTTP (Pull-based)**. A API em nuvem nunca tentará abrir uma conexão direta (push) para o hardware, contornando assim problemas com firewalls residenciais e roteadores NAT.
 *   **URL Base:** `https://<dominio-do-servidor>/api/v1/devices`
@@ -12,7 +12,7 @@ Este documento serve como contrato de comunicação para o **Engenheiro de Firmw
 
 ---
 
-## 2. Autenticação (API Key Estática)
+## 🔒 2. Autenticação (API Key Estática)
 
 A caixa não possui teclado ou usuário humano para realizar login. Portanto, o acesso é garantido via uma **API Key Estática**.
 
@@ -26,7 +26,7 @@ A caixa não possui teclado ou usuário humano para realizar login. Portanto, o 
 
 ---
 
-## 3. Endpoints do Dispositivo
+## 🛣️ 3. Endpoints do Dispositivo
 
 ### 1. Heartbeat (Sinal de Vida e Estado do Hardware)
 
@@ -71,7 +71,7 @@ A caixa baixa a agenda completa de medicamentos do paciente vinculado a ela.
           "device_id": "CX-998877",
           "schedule": [
             {
-              "medication_id": 1,
+              "medication_id": "770e8400-e29b-41d4-a716-446655440000",
               "name": "Paracetamol",
               "dosage": "500mg",
               "time": "14:00:00",

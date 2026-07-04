@@ -27,12 +27,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_client = ApiClient::new();
     let api_client_clone = api_client.clone();
 
-    // Channel for hardware events
+    // Channels for events and hardware commands
     let (tx, mut rx) = mpsc::channel::<EventPayload>(100);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<hardware::HardwareCommand>(10);
 
     // 1. Task: Hardware Monitor
     tokio::spawn(async move {
-        start_hardware_monitor(tx).await;
+        start_hardware_monitor(tx, cmd_rx).await;
     });
 
     // 2. Task: Local Event Persister (Queue Manager)
@@ -41,6 +42,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Received hardware event: {}", event.event_type);
             if let Err(e) = store_clone1.push_event(&event).await {
                 eprintln!("Failed to save event to local DB: {}", e);
+            }
+        }
+    });
+
+    let store_clone3 = store.clone();
+    let cmd_tx_clone = cmd_tx.clone();
+
+    // 5. Task: Scheduler (Relógio Interno)
+    tokio::spawn(async move {
+        use chrono::Datelike;
+        let mut last_alarm_time = String::new();
+        
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            
+            let now = chrono::Local::now();
+            let current_time_str = now.format("%H:%M").to_string(); // "HH:MM"
+            let current_weekday = now.weekday().number_from_monday() as u8; // 1 = Mon, 7 = Sun
+            
+            if let Ok(Some(schedule_resp)) = store_clone3.load_schedule().await {
+                for med in schedule_resp.schedule {
+                    if med.time.starts_with(&current_time_str) && med.week_days.contains(&current_weekday) {
+                        if last_alarm_time != current_time_str {
+                            println!("⏰ ALARME! Hora de tomar: {} ({})", med.name, med.dosage);
+                            last_alarm_time = current_time_str.clone();
+                            let _ = cmd_tx_clone.send(hardware::HardwareCommand::StartAlarm).await;
+                        }
+                    }
+                }
             }
         }
     });

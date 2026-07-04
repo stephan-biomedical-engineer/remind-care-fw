@@ -20,7 +20,7 @@ pub struct HeartbeatResponse {
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct MedicationSchedule {
-    pub medication_id: u32,
+    pub medication_id: String,
     pub name: String,
     pub dosage: String,
     pub time: String,
