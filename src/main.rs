@@ -14,6 +14,7 @@ use store::Store;
 struct ActiveAlarmState {
     medication_id: String,
     triggered_at: chrono::DateTime<chrono::Utc>,
+    buzzer_active: bool,
 }
 
 #[tokio::main]
@@ -95,6 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             *alarm_guard = Some(ActiveAlarmState {
                                 medication_id: med.medication_id.clone(),
                                 triggered_at: chrono::Utc::now(),
+                                buzzer_active: true,
                             });
                             
                             let _ = cmd_tx_clone.send(hardware::HardwareCommand::StartAlarm).await;
@@ -115,11 +117,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::time::sleep(Duration::from_secs(10)).await;
             
             let mut alarm_guard = active_alarm_timeout.lock().await;
-            if let Some(active) = alarm_guard.as_ref() {
+            if let Some(active) = alarm_guard.as_mut() {
                 let now = chrono::Utc::now();
-                // 15 minutos de timeout
-                if now.signed_duration_since(active.triggered_at).num_minutes() >= 15 {
-                    println!("🚨 TIMEOUT! Paciente perdeu a medicação {}.", active.medication_id);
+                let elapsed_minutes = now.signed_duration_since(active.triggered_at).num_minutes();
+                let elapsed_seconds = now.signed_duration_since(active.triggered_at).num_seconds();
+                
+                // Estágio 1: Silenciador de Curta Duração (60 segundos)
+                if active.buzzer_active && elapsed_seconds >= 60 {
+                    println!("🔕 Alarme silenciado (curta duração), mas janela de medicação continua aberta.");
+                    let _ = cmd_tx_timeout.send(hardware::HardwareCommand::StopAlarm).await;
+                    active.buzzer_active = false;
+                }
+
+                // Estágio 2: Fim da Tolerância Clínica (60 minutos)
+                if elapsed_minutes >= 60 {
+                    println!("🚨 JANELA FECHADA! Paciente perdeu a medicação {}.", active.medication_id);
                     
                     let event = EventPayload {
                         event_type: "medication_missed".to_string(),
@@ -130,7 +142,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     let _ = tx_timeout.send(event).await;
 
-                    let _ = cmd_tx_timeout.send(hardware::HardwareCommand::StopAlarm).await;
+                    // Desliga fisicamente por segurança caso ainda estivesse tocando
+                    if active.buzzer_active {
+                        let _ = cmd_tx_timeout.send(hardware::HardwareCommand::StopAlarm).await;
+                    }
 
                     *alarm_guard = None;
                 }
