@@ -11,6 +11,11 @@ use hardware::start_hardware_monitor;
 use models::{EventPayload, HeartbeatRequest};
 use store::Store;
 
+struct ActiveAlarmState {
+    medication_id: String,
+    triggered_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load environment variables (.env)
@@ -31,15 +36,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, mut rx) = mpsc::channel::<EventPayload>(100);
     let (cmd_tx, cmd_rx) = mpsc::channel::<hardware::HardwareCommand>(10);
 
+    // Global Active Alarm State
+    let active_alarm = std::sync::Arc::new(tokio::sync::Mutex::new(None::<ActiveAlarmState>));
+
     // 1. Task: Hardware Monitor
+    let tx_hardware = tx.clone();
     tokio::spawn(async move {
-        start_hardware_monitor(tx, cmd_rx).await;
+        start_hardware_monitor(tx_hardware, cmd_rx).await;
     });
 
     // 2. Task: Local Event Persister (Queue Manager)
+    let active_alarm_clone1 = active_alarm.clone();
     tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
+        while let Some(mut event) = rx.recv().await {
             println!("Received hardware event: {}", event.event_type);
+            
+            if event.event_type == "box_opened" {
+                let mut alarm_guard = active_alarm_clone1.lock().await;
+                if let Some(active) = alarm_guard.take() {
+                    println!("✅ Medicine {} taken on time! Alarm cleared.", active.medication_id);
+                    event.event_type = "medication_taken".to_string();
+                    event.metadata = serde_json::json!({
+                        "medication_id": active.medication_id
+                    });
+                }
+            }
+
             if let Err(e) = store_clone1.push_event(&event).await {
                 eprintln!("Failed to save event to local DB: {}", e);
             }
@@ -48,6 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let store_clone3 = store.clone();
     let cmd_tx_clone = cmd_tx.clone();
+    let active_alarm_clone2 = active_alarm.clone();
 
     // 5. Task: Scheduler (Relógio Interno)
     tokio::spawn(async move {
@@ -67,9 +90,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if last_alarm_time != current_time_str {
                             println!("⏰ ALARME! Hora de tomar: {} ({})", med.name, med.dosage);
                             last_alarm_time = current_time_str.clone();
+                            
+                            let mut alarm_guard = active_alarm_clone2.lock().await;
+                            *alarm_guard = Some(ActiveAlarmState {
+                                medication_id: med.medication_id.clone(),
+                                triggered_at: chrono::Utc::now(),
+                            });
+                            
                             let _ = cmd_tx_clone.send(hardware::HardwareCommand::StartAlarm).await;
                         }
                     }
+                }
+            }
+        }
+    });
+
+    // 6. Task: Alarm Timeout Monitor
+    let active_alarm_timeout = active_alarm.clone();
+    let cmd_tx_timeout = cmd_tx.clone();
+    let tx_timeout = tx.clone();
+    
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            
+            let mut alarm_guard = active_alarm_timeout.lock().await;
+            if let Some(active) = alarm_guard.as_ref() {
+                let now = chrono::Utc::now();
+                // 15 minutos de timeout
+                if now.signed_duration_since(active.triggered_at).num_minutes() >= 15 {
+                    println!("🚨 TIMEOUT! Paciente perdeu a medicação {}.", active.medication_id);
+                    
+                    let event = EventPayload {
+                        event_type: "medication_missed".to_string(),
+                        timestamp: now.timestamp(),
+                        metadata: serde_json::json!({
+                            "medication_id": active.medication_id
+                        }),
+                    };
+                    let _ = tx_timeout.send(event).await;
+
+                    let _ = cmd_tx_timeout.send(hardware::HardwareCommand::StopAlarm).await;
+
+                    *alarm_guard = None;
                 }
             }
         }
