@@ -79,44 +79,61 @@ pub async fn start_hardware_monitor(tx: mpsc::Sender<EventPayload>, mut cmd_rx: 
         }
     });
 
-    let tx_clone = tx.clone();
-    let alarm_active_reed = Arc::clone(&alarm_active);
+    // Mapeamento dos 7 Compartimentos (Pinos GPIO)
+    // Gavetas: 1, 2, 3, 4, 5, 6, 7
+    let compartment_pins: [(u32, u8); 7] = [
+        (1, 5),
+        (2, 6),
+        (3, 13),
+        (4, 19),
+        (5, 26),
+        (6, 17),
+        (7, 27),
+    ];
     
-    // Tarefa 2: Monitor do Reed Switch (Thread Dedicada e Bloqueante)
-    tokio::task::spawn_blocking(move || {
-        reed_pin.set_interrupt(Trigger::Both, Some(Duration::from_millis(200))).expect("Failed to set interrupt");
-        println!("Hardware monitor started on PIN {} (Reed) and PIN {} (Buzzer)", REED_SWITCH_PIN, BUZZER_PIN);
+    // Tarefa 2: Monitor dos 7 Reed Switches (Múltiplas Threads Dedicadas)
+    for (compartment_id, pin_num) in compartment_pins {
+        let tx_clone = tx.clone();
+        let alarm_active_reed = Arc::clone(&alarm_active);
         
-        loop {
-            match reed_pin.poll_interrupt(true, Some(Duration::from_secs(3600))) {
-                Ok(Some(_event)) => {
-                    let is_open = reed_pin.is_high(); // Depende do wiring físico
-                    let event_type = if is_open { "box_opened" } else { "box_closed" };
-                    
-                    if is_open {
-                        // Se a caixa abrir, silencia o alarme instantaneamente!
-                        *alarm_active_reed.lock().unwrap() = false;
-                        println!("Hardware: Caixa aberta! Alarme desarmado.");
-                    }
-                    
-                    let event = EventPayload {
-                        event_type: event_type.to_string(),
-                        timestamp: Utc::now().timestamp(),
-                        metadata: serde_json::json!({
-                            "pin": REED_SWITCH_PIN
-                        }),
-                    };
-                    
-                    if let Err(e) = tx_clone.blocking_send(event) {
-                        eprintln!("Failed to send event to queue: {}", e);
-                        break;
-                    }
-                },
-                Ok(None) => {},
-                Err(e) => eprintln!("GPIO Interrupt error: {}", e),
+        let mut reed_pin = gpio.get(pin_num).expect("Failed to get reed pin").into_input_pullup();
+        
+        tokio::task::spawn_blocking(move || {
+            reed_pin.set_interrupt(Trigger::Both, Some(Duration::from_millis(200))).expect("Failed to set interrupt");
+            println!("Hardware monitor started for Compartment {} on PIN {}", compartment_id, pin_num);
+            
+            loop {
+                match reed_pin.poll_interrupt(true, Some(Duration::from_secs(3600))) {
+                    Ok(Some(_event)) => {
+                        let is_open = reed_pin.is_high(); // Depende do wiring físico
+                        let event_type = if is_open { "compartment_opened" } else { "compartment_closed" };
+                        
+                        if is_open {
+                            // Se qualquer caixa abrir, silencia o alarme
+                            *alarm_active_reed.lock().unwrap() = false;
+                            println!("Hardware: Compartimento {} aberto! Alarme desarmado.", compartment_id);
+                        }
+                        
+                        let event = EventPayload {
+                            event_type: event_type.to_string(),
+                            timestamp: Utc::now().timestamp(),
+                            metadata: serde_json::json!({
+                                "compartment": compartment_id,
+                                "pin": pin_num
+                            }),
+                        };
+                        
+                        if let Err(e) = tx_clone.blocking_send(event) {
+                            eprintln!("Failed to send event to queue: {}", e);
+                            break;
+                        }
+                    },
+                    Ok(None) => {},
+                    Err(e) => eprintln!("GPIO Interrupt error on pin {}: {}", pin_num, e),
+                }
             }
-        }
-    });
+        });
+    }
 }
 
 #[cfg(not(target_arch = "aarch64"))]
@@ -178,23 +195,23 @@ pub async fn start_hardware_monitor(tx: mpsc::Sender<EventPayload>, mut cmd_rx: 
         }
         
         let event = EventPayload {
-            event_type: "box_opened".to_string(),
+            event_type: "compartment_opened".to_string(),
             timestamp: Utc::now().timestamp(),
-            metadata: serde_json::json!({"mocked": true}),
+            metadata: serde_json::json!({"compartment": 3, "mocked": true}),
         };
         
-        println!("Simulating box_opened event...");
+        println!("Simulating compartment_opened event (Compartment 3)...");
         let _ = tx_clone.send(event).await;
         
         tokio::time::sleep(Duration::from_secs(5)).await;
         
         let event_close = EventPayload {
-            event_type: "box_closed".to_string(),
+            event_type: "compartment_closed".to_string(),
             timestamp: Utc::now().timestamp(),
-            metadata: serde_json::json!({"mocked": true}),
+            metadata: serde_json::json!({"compartment": 3, "mocked": true}),
         };
         
-        println!("Simulating box_closed event...");
+        println!("Simulating compartment_closed event (Compartment 3)...");
         let _ = tx_clone.send(event_close).await;
     }
 }

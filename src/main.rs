@@ -13,6 +13,7 @@ use store::Store;
 
 struct ActiveAlarmState {
     medication_id: String,
+    compartment: u32,
     triggered_at: chrono::DateTime<chrono::Utc>,
     buzzer_active: bool,
 }
@@ -52,14 +53,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         while let Some(mut event) = rx.recv().await {
             println!("Received hardware event: {}", event.event_type);
             
-            if event.event_type == "box_opened" {
-                let mut alarm_guard = active_alarm_clone1.lock().await;
-                if let Some(active) = alarm_guard.take() {
-                    println!("✅ Medicine {} taken on time! Alarm cleared.", active.medication_id);
-                    event.event_type = "medication_taken".to_string();
-                    event.metadata = serde_json::json!({
-                        "medication_id": active.medication_id
-                    });
+            if event.event_type == "compartment_opened" {
+                if let Some(comp_val) = event.metadata.get("compartment") {
+                    if let Some(compartment_opened) = comp_val.as_u64() {
+                        let mut alarm_guard = active_alarm_clone1.lock().await;
+                        
+                        // Check if it's the active alarm (to clear it and silence)
+                        if let Some(active) = alarm_guard.as_mut() {
+                            if active.compartment == compartment_opened as u32 {
+                                println!("✅ Medicine {} taken! Active alarm cleared.", active.medication_id);
+                                *alarm_guard = None; // Clears the alarm
+                            } else {
+                                println!("⚠️ Wrong compartment {} opened while alarm was for compartment {}", compartment_opened, active.compartment);
+                            }
+                        }
+                        
+                        // Now calculate clinical status
+                        if let Ok(Some(schedule_resp)) = store_clone1.load_schedule().await {
+                            use chrono::Datelike;
+                            let now = chrono::Local::now();
+                            let current_weekday = now.weekday().number_from_monday() as u8;
+                            
+                            // Find medicine for this compartment today
+                            let mut closest_med = None;
+                            let mut smallest_diff: i64 = i64::MAX;
+                            
+                            for med in schedule_resp.schedule {
+                                if med.compartment == compartment_opened as u32 && med.week_days.contains(&current_weekday) {
+                                    if let Ok(sched_time) = chrono::NaiveTime::parse_from_str(&med.time, "%H:%M:%S") {
+                                        let diff = now.time().signed_duration_since(sched_time).num_minutes();
+                                        if diff.abs() < smallest_diff.abs() {
+                                            smallest_diff = diff;
+                                            closest_med = Some(med.clone());
+                                        }
+                                    } else if let Ok(sched_time) = chrono::NaiveTime::parse_from_str(&med.time, "%H:%M") {
+                                        let diff = now.time().signed_duration_since(sched_time).num_minutes();
+                                        if diff.abs() < smallest_diff.abs() {
+                                            smallest_diff = diff;
+                                            closest_med = Some(med.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            if let Some(med) = closest_med {
+                                let situation = if smallest_diff < -15 {
+                                    "early"
+                                } else if smallest_diff <= 15 {
+                                    "onTime"
+                                } else if smallest_diff <= 45 {
+                                    "warning"
+                                } else if smallest_diff <= 60 {
+                                    "late"
+                                } else {
+                                    "missed"
+                                };
+                                
+                                println!("📊 Clinical Event for Compartment {}: {} (Diff: {} min)", compartment_opened, situation, smallest_diff);
+                                
+                                // Override the event to send medication_status
+                                event.event_type = "medication_status".to_string();
+                                event.metadata = serde_json::json!({
+                                    "medication_id": med.medication_id,
+                                    "situation": situation,
+                                    "compartment": compartment_opened
+                                });
+                            }
+                        }
+                    }
                 }
             }
 
@@ -95,6 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let mut alarm_guard = active_alarm_clone2.lock().await;
                             *alarm_guard = Some(ActiveAlarmState {
                                 medication_id: med.medication_id.clone(),
+                                compartment: med.compartment,
                                 triggered_at: chrono::Utc::now(),
                                 buzzer_active: true,
                             });
@@ -129,15 +191,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     active.buzzer_active = false;
                 }
 
-                // Estágio 2: Fim da Tolerância Clínica (60 minutos)
-                if elapsed_minutes >= 60 {
+                // Estágio 2: Fim da Tolerância Clínica (2 minutos para teste rápido)
+                if elapsed_minutes >= 2 {
                     println!("🚨 JANELA FECHADA! Paciente perdeu a medicação {}.", active.medication_id);
                     
                     let event = EventPayload {
-                        event_type: "medication_missed".to_string(),
+                        event_type: "medication_status".to_string(),
                         timestamp: now.timestamp(),
                         metadata: serde_json::json!({
-                            "medication_id": active.medication_id
+                            "medication_id": active.medication_id,
+                            "situation": "missed",
+                            "compartment": active.compartment
                         }),
                     };
                     let _ = tx_timeout.send(event).await;
