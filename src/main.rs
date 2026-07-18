@@ -145,6 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store_clone3 = store.clone();
     let cmd_tx_clone = cmd_tx.clone();
     let active_alarm_clone2 = active_alarm.clone();
+    let taken_meds_scheduler = taken_medications.clone();
 
     // 5. Task: Scheduler (Relógio Interno)
     tokio::spawn(async move {
@@ -162,18 +163,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for med in schedule_resp.schedule {
                     if med.time.starts_with(&current_time_str) && med.week_days.contains(&current_weekday) {
                         if last_alarm_time != current_time_str {
-                            println!("⏰ ALARME! Hora de tomar: {} ({})", med.name, med.dosage);
                             last_alarm_time = current_time_str.clone();
                             
-                            let mut alarm_guard = active_alarm_clone2.lock().await;
-                            *alarm_guard = Some(ActiveAlarmState {
-                                medication_id: med.medication_id.clone(),
-                                compartment: med.compartment,
-                                triggered_at: chrono::Utc::now(),
-                                buzzer_active: true,
-                            });
+                            let today_str = now.format("%Y-%m-%d").to_string();
+                            let debounce_key = format!("{}-{}", med.medication_id, today_str);
                             
-                            let _ = cmd_tx_clone.send(hardware::HardwareCommand::StartAlarm).await;
+                            let taken_guard = taken_meds_scheduler.lock().await;
+                            if taken_guard.contains(&debounce_key) {
+                                println!("⏰ ALARME IGNORADO: Medicamento {} já foi tomado hoje.", med.name);
+                            } else {
+                                println!("⏰ ALARME! Hora de tomar: {} ({})", med.name, med.dosage);
+                                
+                                let mut alarm_guard = active_alarm_clone2.lock().await;
+                                *alarm_guard = Some(ActiveAlarmState {
+                                    medication_id: med.medication_id.clone(),
+                                    compartment: med.compartment,
+                                    triggered_at: chrono::Utc::now(),
+                                    buzzer_active: true,
+                                });
+                                
+                                let _ = cmd_tx_clone.send(hardware::HardwareCommand::StartAlarm).await;
+                            }
                         }
                     }
                 }
@@ -203,8 +213,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     active.buzzer_active = false;
                 }
 
-                // Estágio 2: Fim da Tolerância Clínica (2 minutos para teste rápido)
-                if elapsed_minutes >= 2 {
+                // Estágio 2: Fim da Tolerância Clínica (60 minutos)
+                if elapsed_minutes >= 60 {
                     println!("🚨 JANELA FECHADA! Paciente perdeu a medicação {}.", active.medication_id);
                     
                     let event = EventPayload {
