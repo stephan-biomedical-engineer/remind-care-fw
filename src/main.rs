@@ -38,8 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, mut rx) = mpsc::channel::<EventPayload>(100);
     let (cmd_tx, cmd_rx) = mpsc::channel::<hardware::HardwareCommand>(10);
 
-    // Global Active Alarm State
     let active_alarm = std::sync::Arc::new(tokio::sync::Mutex::new(None::<ActiveAlarmState>));
+    let taken_medications = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::<String>::new()));
 
     // 1. Task: Hardware Monitor
     let tx_hardware = tx.clone();
@@ -49,6 +49,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Task: Local Event Persister (Queue Manager)
     let active_alarm_clone1 = active_alarm.clone();
+    let taken_meds_clone = taken_medications.clone();
+    
     tokio::spawn(async move {
         while let Some(mut event) = rx.recv().await {
             println!("Received hardware event: {}", event.event_type);
@@ -97,27 +99,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             
                             if let Some(med) = closest_med {
-                                let situation = if smallest_diff < -15 {
-                                    "early"
-                                } else if smallest_diff <= 15 {
-                                    "onTime"
-                                } else if smallest_diff <= 45 {
-                                    "warning"
-                                } else if smallest_diff <= 60 {
-                                    "late"
+                                let today_str = now.format("%Y-%m-%d").to_string();
+                                let debounce_key = format!("{}-{}", med.medication_id, today_str);
+                                
+                                let mut taken_guard = taken_meds_clone.lock().await;
+                                if taken_guard.contains(&debounce_key) {
+                                    println!("Debounce: Status clínico do medicamento {} já foi registrado hoje. Ignorando evento clínico duplicado.", med.medication_id);
                                 } else {
-                                    "missed"
-                                };
-                                
-                                println!("📊 Clinical Event for Compartment {}: {} (Diff: {} min)", compartment_opened, situation, smallest_diff);
-                                
-                                // Override the event to send medication_status
-                                event.event_type = "medication_status".to_string();
-                                event.metadata = serde_json::json!({
-                                    "medication_id": med.medication_id,
-                                    "situation": situation,
-                                    "compartment": compartment_opened
-                                });
+                                    taken_guard.insert(debounce_key);
+
+                                    let situation = if smallest_diff < -15 {
+                                        "early"
+                                    } else if smallest_diff <= 15 {
+                                        "onTime"
+                                    } else if smallest_diff <= 45 {
+                                        "warning"
+                                    } else if smallest_diff <= 60 {
+                                        "late"
+                                    } else {
+                                        "missed"
+                                    };
+                                    
+                                    println!("📊 Clinical Event for Compartment {}: {} (Diff: {} min)", compartment_opened, situation, smallest_diff);
+                                    
+                                    // Override the event to send medication_status
+                                    event.event_type = "medication_status".to_string();
+                                    event.metadata = serde_json::json!({
+                                        "medication_id": med.medication_id,
+                                        "situation": situation,
+                                        "compartment": compartment_opened
+                                    });
+                                }
                             }
                         }
                     }
